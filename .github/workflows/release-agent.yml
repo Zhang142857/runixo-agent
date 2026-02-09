@@ -161,7 +161,6 @@ jobs:
 
           files: |
             dist/runixo-agent-*
-            dist/*.tar.gz
             dist/checksums.txt
           draft: false
           prerelease: false
