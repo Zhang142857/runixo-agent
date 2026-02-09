@@ -12,12 +12,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+const (
+	releaseURL     = "https://api.github.com/repos/Zhang142857/runixo-agent/releases/latest"
+	apiTimeout     = 15 * time.Second
+	downloadTimeout = 10 * time.Minute
+	applyCooldown  = 60 * time.Second // 防止 DoS 反复触发更新
+)
+
+var versionRegex = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[\w.]+)?$`)
 
 // Config 更新配置
 type Config struct {
@@ -32,7 +42,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		AutoUpdate:    false,
-		CheckInterval: 3600, // 1小时
+		CheckInterval: 3600,
 		UpdateChannel: "stable",
 		NotifyOnly:    true,
 	}
@@ -65,7 +75,7 @@ type DownloadProgress struct {
 	Downloaded int64  `json:"downloaded"`
 	Total      int64  `json:"total"`
 	Percent    int    `json:"percent"`
-	Status     string `json:"status"` // downloading, verifying, ready
+	Status     string `json:"status"`
 }
 
 // Updater 更新器
@@ -79,11 +89,12 @@ type Updater struct {
 	checkTicker    *time.Ticker
 	history        []UpdateRecord
 	progressChan   chan *DownloadProgress
+	lastApply      time.Time // 防 DoS 冷却
 }
 
 // NewUpdater 创建更新器
 func NewUpdater(currentVersion, dataDir string) (*Updater, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("创建数据目录失败: %w", err)
 	}
 
@@ -98,7 +109,6 @@ func NewUpdater(currentVersion, dataDir string) (*Updater, error) {
 		progressChan:   make(chan *DownloadProgress, 10),
 	}
 
-	// 加载配置
 	u.loadConfig()
 	u.loadHistory()
 
@@ -110,18 +120,13 @@ func (u *Updater) loadConfig() {
 	configFile := filepath.Join(u.dataDir, "update_config.json")
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Warn().Err(err).Msg("加载更新配置失败")
-		}
 		return
 	}
-
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		log.Warn().Err(err).Msg("解析更新配置失败")
 		return
 	}
-
 	u.config = &config
 }
 
@@ -132,7 +137,7 @@ func (u *Updater) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configFile, data, 0644)
+	return os.WriteFile(configFile, data, 0600)
 }
 
 // loadHistory 加载更新历史
@@ -142,7 +147,6 @@ func (u *Updater) loadHistory() {
 	if err != nil {
 		return
 	}
-
 	json.Unmarshal(data, &u.history)
 }
 
@@ -153,7 +157,7 @@ func (u *Updater) saveHistory() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(historyFile, data, 0644)
+	return os.WriteFile(historyFile, data, 0600)
 }
 
 // Start 启动更新器
@@ -167,9 +171,7 @@ func (u *Updater) Start() {
 	u.checkTicker = time.NewTicker(interval)
 
 	go func() {
-		// 启动时检查一次
 		u.checkAndUpdate()
-
 		for {
 			select {
 			case <-u.ctx.Done():
@@ -180,10 +182,7 @@ func (u *Updater) Start() {
 		}
 	}()
 
-	log.Info().
-		Int("interval", u.config.CheckInterval).
-		Str("channel", u.config.UpdateChannel).
-		Msg("自动更新已启动")
+	log.Info().Int("interval", u.config.CheckInterval).Msg("自动更新已启动")
 }
 
 // Stop 停止更新器
@@ -201,24 +200,16 @@ func (u *Updater) checkAndUpdate() {
 		log.Warn().Err(err).Msg("检查更新失败")
 		return
 	}
-
 	if !info.Available {
-		log.Debug().Msg("当前已是最新版本")
 		return
 	}
 
-	log.Info().
-		Str("current", info.CurrentVersion).
-		Str("latest", info.LatestVersion).
-		Bool("critical", info.IsCritical).
-		Msg("发现新版本")
+	log.Info().Str("current", info.CurrentVersion).Str("latest", info.LatestVersion).Msg("发现新版本")
 
 	if u.config.NotifyOnly && !info.IsCritical {
-		log.Info().Msg("仅通知模式，跳过自动更新")
 		return
 	}
 
-	// 下载并应用更新
 	if err := u.DownloadAndApply(info); err != nil {
 		log.Error().Err(err).Msg("更新失败")
 		u.recordUpdate(info.LatestVersion, false, err.Error())
@@ -232,9 +223,8 @@ func (u *Updater) CheckUpdate() (*UpdateInfo, error) {
 	u.saveConfig()
 	u.mu.Unlock()
 
-	url := "https://api.github.com/repos/Zhang142857/runixo/releases/tags/latest"
-	httpClient := &http.Client{Timeout: 15 * time.Second}
-	resp, err := httpClient.Get(url)
+	httpClient := &http.Client{Timeout: apiTimeout}
+	resp, err := httpClient.Get(releaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("请求 GitHub 失败: %w", err)
 	}
@@ -254,57 +244,61 @@ func (u *Updater) CheckUpdate() (*UpdateInfo, error) {
 		} `json:"assets"`
 		PublishedAt string `json:"published_at"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
 		return nil, fmt.Errorf("解析 GitHub 响应失败: %w", err)
 	}
 
-	// 查找当前平台的二进制
-	assetName := fmt.Sprintf("runixo-agent-%s-%s", runtime.GOOS, runtime.GOARCH)
+	// 验证版本号格式
+	if !versionRegex.MatchString(release.TagName) {
+		return nil, fmt.Errorf("无效的版本号格式: %s", release.TagName)
+	}
+
+	// 查找当前平台的二进制（tar.gz）
+	assetSuffix := fmt.Sprintf("%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	var downloadURL string
 	var size int64
+	var checksum string
 	for _, a := range release.Assets {
-		if a.Name == assetName {
+		if a.Name == "runixo-agent-"+assetSuffix {
 			downloadURL = a.URL
 			size = a.Size
-			break
+		}
+		if a.Name == "checksums.txt" {
+			checksum = a.URL // 后续下载校验文件
 		}
 	}
 
-	// 比较版本：从 release 的 body 中提取 commit sha 或直接比较文件大小
-	// 简单方案：如果 release 中有对应平台的文件，且当前版本不等于 latest tag，则有更新
-	latestVersion := release.TagName
-	available := downloadURL != "" && latestVersion != u.currentVersion
+	available := downloadURL != "" && release.TagName != u.currentVersion
 
 	return &UpdateInfo{
 		Available:      available,
 		CurrentVersion: u.currentVersion,
-		LatestVersion:  latestVersion,
+		LatestVersion:  release.TagName,
 		ReleaseNotes:   release.Body,
 		DownloadURL:    downloadURL,
 		Size:           size,
+		Checksum:       checksum,
 		ReleaseDate:    release.PublishedAt,
 	}, nil
 }
 
 // DownloadUpdate 下载更新
 func (u *Updater) DownloadUpdate(version string, progressChan chan<- *DownloadProgress) (string, error) {
-	// 获取更新信息
 	info, err := u.CheckUpdate()
 	if err != nil {
 		return "", err
 	}
-
 	if !info.Available || info.LatestVersion != version {
 		return "", fmt.Errorf("版本 %s 不可用", version)
 	}
-
 	return u.downloadAndExtract(info, progressChan)
 }
 
-// downloadFile 下载文件（使用 context 控制连接超时，不限制 body 读取时间）
+// downloadFile 下载文件（带总超时）
 func (u *Updater) downloadFile(downloadURL, destPath string, totalSize int64, progressChan chan<- *DownloadProgress) error {
-	ctx, cancel := context.WithTimeout(u.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(u.ctx, downloadTimeout)
 	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err
@@ -314,55 +308,59 @@ func (u *Updater) downloadFile(downloadURL, destPath string, totalSize int64, pr
 		return err
 	}
 	defer resp.Body.Close()
-	// 连接已建立，取消连接超时，后续读取不限时
-	cancel()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载失败: %s", resp.Status)
 	}
 
-	out, err := os.Create(destPath)
+	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	// 带进度的复制
 	var downloaded int64
 	buf := make([]byte, 32*1024)
-
 	for {
-		n, err := resp.Body.Read(buf)
+		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
 				return writeErr
 			}
 			downloaded += int64(n)
-
 			if progressChan != nil && totalSize > 0 {
-				percent := int(float64(downloaded) / float64(totalSize) * 100)
 				progressChan <- &DownloadProgress{
-					Downloaded: downloaded,
-					Total:      totalSize,
-					Percent:    percent,
-					Status:     "downloading",
+					Downloaded: downloaded, Total: totalSize,
+					Percent: int(float64(downloaded) / float64(totalSize) * 100),
+					Status: "downloading",
 				}
 			}
 		}
-		if err == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return err
+		if readErr != nil {
+			return readErr
 		}
 	}
-
 	return nil
 }
 
-// ApplyUpdate 应用更新（先下载再替换二进制）
+// ApplyUpdate 应用更新
 func (u *Updater) ApplyUpdate(version string) error {
-	// 先检查更新获取下载信息
+	// 冷却检查，防止 DoS
+	u.mu.Lock()
+	if time.Since(u.lastApply) < applyCooldown {
+		u.mu.Unlock()
+		return fmt.Errorf("更新冷却中，请 %d 秒后重试", int(applyCooldown.Seconds()))
+	}
+	u.lastApply = time.Now()
+	u.mu.Unlock()
+
+	if !versionRegex.MatchString(version) {
+		return fmt.Errorf("无效的版本号: %s", version)
+	}
+
 	info, err := u.CheckUpdate()
 	if err != nil {
 		return fmt.Errorf("获取更新信息失败: %w", err)
@@ -371,17 +369,16 @@ func (u *Updater) ApplyUpdate(version string) error {
 		return fmt.Errorf("没有可用更新")
 	}
 
-	// 下载二进制
 	downloadDir := filepath.Join(u.dataDir, "downloads")
-	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+	if err := os.MkdirAll(downloadDir, 0700); err != nil {
 		return err
 	}
+
 	binaryPath := filepath.Join(downloadDir, "runixo-agent")
 	if runtime.GOOS == "windows" {
 		binaryPath += ".exe"
 	}
 
-	log.Info().Str("url", info.DownloadURL).Msg("开始下载更新")
 	if err := u.downloadFile(info.DownloadURL, binaryPath, info.Size, nil); err != nil {
 		return fmt.Errorf("下载失败: %w", err)
 	}
@@ -392,17 +389,15 @@ func (u *Updater) ApplyUpdate(version string) error {
 // downloadAndExtract 下载 tar.gz 并提取二进制
 func (u *Updater) downloadAndExtract(info *UpdateInfo, progressChan chan<- *DownloadProgress) (string, error) {
 	downloadDir := filepath.Join(u.dataDir, "downloads")
-	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+	if err := os.MkdirAll(downloadDir, 0700); err != nil {
 		return "", err
 	}
 
-	// 下载 tar.gz
 	tarPath := filepath.Join(downloadDir, fmt.Sprintf("runixo-agent-%s.tar.gz", info.LatestVersion))
 	if err := u.downloadFile(info.DownloadURL, tarPath, info.Size, progressChan); err != nil {
 		return "", err
 	}
 
-	// 验证校验和
 	if progressChan != nil {
 		progressChan <- &DownloadProgress{Downloaded: info.Size, Total: info.Size, Percent: 100, Status: "verifying"}
 	}
@@ -418,7 +413,6 @@ func (u *Updater) downloadAndExtract(info *UpdateInfo, progressChan chan<- *Down
 		}
 	}
 
-	// 解压提取二进制
 	binaryName := "runixo-agent"
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
@@ -438,7 +432,7 @@ func (u *Updater) downloadAndExtract(info *UpdateInfo, progressChan chan<- *Down
 	return binaryPath, nil
 }
 
-// applyBinary 替换当前二进制并重启
+// applyBinary 替换当前二进制并重启（原子 rename）
 func (u *Updater) applyBinary(binaryPath, version string) error {
 	if _, err := os.Stat(binaryPath); os.IsNotExist(err) {
 		return fmt.Errorf("更新文件不存在: %s", binaryPath)
@@ -448,22 +442,34 @@ func (u *Updater) applyBinary(binaryPath, version string) error {
 	if err != nil {
 		return fmt.Errorf("获取当前可执行文件路径失败: %w", err)
 	}
+	// 解析符号链接，防止符号链接攻击
+	currentExe, err = filepath.EvalSymlinks(currentExe)
+	if err != nil {
+		return fmt.Errorf("解析符号链接失败: %w", err)
+	}
 
-	// 备份 → 替换 → 设权限
 	backupPath := currentExe + ".backup"
+
+	// 备份当前版本
 	if err := os.Rename(currentExe, backupPath); err != nil {
 		return fmt.Errorf("备份当前版本失败: %w", err)
 	}
-	if err := copyFile(binaryPath, currentExe); err != nil {
-		os.Rename(backupPath, currentExe)
-		return fmt.Errorf("安装新版本失败: %w", err)
+
+	// 原子替换：rename 比 copy 更安全（同文件系统下原子操作）
+	if err := os.Rename(binaryPath, currentExe); err != nil {
+		// rename 失败（跨文件系统），回退到 copy
+		if cpErr := copyFile(binaryPath, currentExe); cpErr != nil {
+			os.Rename(backupPath, currentExe) // 回滚
+			return fmt.Errorf("安装新版本失败: %w", cpErr)
+		}
+		os.Remove(binaryPath)
 	}
+
 	if runtime.GOOS != "windows" {
 		os.Chmod(currentExe, 0755)
 	}
 
 	u.recordUpdate(version, true, "")
-	os.Remove(binaryPath)
 	log.Info().Str("version", version).Msg("更新已应用，即将重启服务")
 	go u.restartService()
 	return nil
@@ -474,65 +480,43 @@ func (u *Updater) DownloadAndApply(info *UpdateInfo) error {
 	progressChan := make(chan *DownloadProgress, 10)
 	defer close(progressChan)
 
-	// 启动进度日志
 	go func() {
 		for p := range progressChan {
-			log.Debug().
-				Int64("downloaded", p.Downloaded).
-				Int64("total", p.Total).
-				Int("percent", p.Percent).
-				Str("status", p.Status).
-				Msg("下载进度")
+			log.Debug().Int("percent", p.Percent).Str("status", p.Status).Msg("下载进度")
 		}
 	}()
 
-	// 直接下载，不再重复 CheckUpdate
 	binaryPath, err := u.downloadAndExtract(info, progressChan)
 	if err != nil {
 		return err
 	}
-
-	// 应用（传入已解压的二进制路径）
 	return u.applyBinary(binaryPath, info.LatestVersion)
 }
 
 // restartService 重启服务
 func (u *Updater) restartService() {
 	time.Sleep(2 * time.Second)
-
-	// 尝试使用 systemctl 重启
 	if runtime.GOOS == "linux" {
-		cmd := exec.Command("systemctl", "restart", "runixo-agent")
-		if err := cmd.Run(); err != nil {
-			log.Warn().Err(err).Msg("systemctl 重启失败，尝试直接重启")
-		} else {
+		if exec.Command("systemctl", "restart", "runixo-agent").Run() == nil {
 			return
 		}
 	}
-
-	// 直接退出，让进程管理器重启
 	log.Info().Msg("正在重启...")
 	os.Exit(0)
 }
 
 // recordUpdate 记录更新
 func (u *Updater) recordUpdate(version string, success bool, errMsg string) {
-	record := UpdateRecord{
-		Version:     version,
-		FromVersion: u.currentVersion,
-		Timestamp:   time.Now().Unix(),
-		Success:     success,
-		Error:       errMsg,
-	}
-
 	u.mu.Lock()
-	u.history = append(u.history, record)
-	// 只保留最近 50 条记录
+	defer u.mu.Unlock()
+	u.history = append(u.history, UpdateRecord{
+		Version: version, FromVersion: u.currentVersion,
+		Timestamp: time.Now().Unix(), Success: success, Error: errMsg,
+	})
 	if len(u.history) > 50 {
 		u.history = u.history[len(u.history)-50:]
 	}
 	u.saveHistory()
-	u.mu.Unlock()
 }
 
 // GetConfig 获取配置
@@ -546,19 +530,13 @@ func (u *Updater) GetConfig() *Config {
 func (u *Updater) SetConfig(config *Config) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-
 	u.config = config
-
-	// 重新启动定时检查
 	if u.checkTicker != nil {
 		u.checkTicker.Stop()
 	}
-
 	if config.AutoUpdate {
-		interval := time.Duration(config.CheckInterval) * time.Second
-		u.checkTicker = time.NewTicker(interval)
+		u.checkTicker = time.NewTicker(time.Duration(config.CheckInterval) * time.Second)
 	}
-
 	return u.saveConfig()
 }
 
@@ -574,37 +552,32 @@ func (u *Updater) GetCurrentVersion() string {
 	return u.currentVersion
 }
 
-// verifyChecksum 验证校验和
+// verifyChecksum 验证 SHA256 校验和
 func verifyChecksum(filePath, expected string) (bool, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return false, err
 	}
 	defer f.Close()
-
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return false, err
 	}
-
-	actual := hex.EncodeToString(h.Sum(nil))
-	return actual == expected, nil
+	return hex.EncodeToString(h.Sum(nil)) == expected, nil
 }
 
-// copyFile 复制文件
+// copyFile 复制文件（跨文件系统 fallback）
 func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
+	defer out.Close()
+	_, err = io.Copy(out, in)
 	return err
 }
