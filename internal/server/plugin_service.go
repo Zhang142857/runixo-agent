@@ -3,12 +3,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 
 	pb "github.com/runixo/agent/api/proto"
 	"github.com/runixo/agent/internal/plugin"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+var validPluginID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
 // PluginServer 实现 PluginServiceServer
 type PluginServer struct {
@@ -39,6 +42,18 @@ func (s *PluginServer) ListPlugins(ctx context.Context, req *pb.Empty) (*pb.Plug
 func (s *PluginServer) InstallPlugin(ctx context.Context, req *pb.InstallPluginRequest) (*pb.ActionResponse, error) {
 	if req.PluginId == "" {
 		return &pb.ActionResponse{Success: false, Error: "插件 ID 不能为空"}, nil
+	}
+
+	// 验证插件 ID 格式（只允许字母数字和连字符）
+	if !validPluginID.MatchString(req.PluginId) {
+		return &pb.ActionResponse{Success: false, Error: "插件 ID 格式无效，只允许字母、数字、下划线和连字符"}, nil
+	}
+
+	// SSRF 防护：验证 URL 不指向内网
+	if req.Url != "" {
+		if err := isBlockedURL(req.Url); err != nil {
+			return &pb.ActionResponse{Success: false, Error: "插件 URL 安全检查失败: " + err.Error()}, nil
+		}
 	}
 
 	source := req.Source

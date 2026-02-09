@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -401,16 +402,26 @@ func (u *Updater) downloadAndExtract(info *UpdateInfo, progressChan chan<- *Down
 	if progressChan != nil {
 		progressChan <- &DownloadProgress{Downloaded: info.Size, Total: info.Size, Percent: 100, Status: "verifying"}
 	}
+
+	// 强制校验和验证：下载 checksums.txt 并比对
 	if info.Checksum != "" {
-		valid, err := verifyChecksum(tarPath, info.Checksum)
+		checksumValue, err := fetchChecksumForFile(info.Checksum, fmt.Sprintf("runixo-agent-%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH))
+		if err != nil {
+			os.Remove(tarPath)
+			return "", fmt.Errorf("获取校验和失败: %w", err)
+		}
+		valid, err := verifyChecksum(tarPath, checksumValue)
 		if err != nil {
 			os.Remove(tarPath)
 			return "", fmt.Errorf("验证校验和失败: %w", err)
 		}
 		if !valid {
 			os.Remove(tarPath)
-			return "", fmt.Errorf("校验和不匹配")
+			return "", fmt.Errorf("校验和不匹配，文件可能被篡改")
 		}
+	} else {
+		os.Remove(tarPath)
+		return "", fmt.Errorf("缺少校验和信息，拒绝安装未验证的更新")
 	}
 
 	binaryName := "runixo-agent"
@@ -550,6 +561,35 @@ func (u *Updater) GetHistory() []UpdateRecord {
 // GetCurrentVersion 获取当前版本
 func (u *Updater) GetCurrentVersion() string {
 	return u.currentVersion
+}
+
+// fetchChecksumForFile 从 checksums.txt URL 下载并解析指定文件的 SHA256 值
+func fetchChecksumForFile(checksumURL, filename string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("下载校验和文件失败: %s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16)) // 64KB limit
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == filename {
+			return parts[0], nil
+		}
+	}
+	return "", fmt.Errorf("checksums.txt 中未找到 %s 的校验和", filename)
 }
 
 // verifyChecksum 验证 SHA256 校验和

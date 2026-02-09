@@ -43,13 +43,13 @@ type TokenConfig struct {
 	RefreshWindow time.Duration `json:"refresh_window"`
 }
 
-// DefaultTokenConfig 返回默认令牌配置（偏向便利）
+// DefaultTokenConfig 返回默认令牌配置（安全优先）
 func DefaultTokenConfig() *TokenConfig {
 	return &TokenConfig{
-		EnableExpiry:   false,              // 默认不启用过期，方便使用
-		ExpiryDuration: DefaultTokenExpiry, // 如果启用，7天有效期
-		AllowRefresh:   true,               // 允许刷新
-		RefreshWindow:  24 * time.Hour,     // 过期前24小时可刷新
+		EnableExpiry:   true,               // 默认启用过期，安全优先
+		ExpiryDuration: DefaultTokenExpiry, // 7天有效期
+		AllowRefresh:   true,               // 允许静默刷新（客户端自动续期，用户无感知）
+		RefreshWindow:  48 * time.Hour,     // 过期前48小时可刷新（宽松窗口确保客户端有足够时间续期）
 	}
 }
 

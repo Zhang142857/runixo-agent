@@ -30,7 +30,7 @@ type SecurityConfig struct {
 // DefaultSecurityConfig 返回默认安全配置
 func DefaultSecurityConfig() *SecurityConfig {
 	return &SecurityConfig{
-		EnableCommandWhitelist: false,
+		EnableCommandWhitelist: true,
 		CommandWhitelist: []string{
 			// 系统信息
 			"uname", "hostname", "uptime", "whoami", "id", "date", "cal",
@@ -50,11 +50,9 @@ func DefaultSecurityConfig() *SecurityConfig {
 			"docker", "docker-compose",
 			// 包管理
 			"apt", "apt-get", "yum", "dnf", "pacman", "rpm", "dpkg",
-			// Shell - 允许执行脚本
-			"bash", "sh", "dash", "zsh",
-			// 其他常用
+			// 其他常用（注意：交互式 shell 通过 ExecuteShell 走，不在此白名单）
 			"echo", "printf", "env", "printenv", "free", "vmstat", "iostat",
-			"tar", "gzip", "gunzip", "zip", "unzip", "xz", "mkdir", "cp", "mv", "rm", "touch", "chmod", "chown",
+			"tar", "gzip", "gunzip", "zip", "unzip", "xz", "mkdir", "cp", "mv", "touch",
 			"ssh-keygen", "openssl",
 			"git", "npm", "node", "npx", "yarn", "pnpm",
 			"python", "python3", "pip", "pip3",
@@ -75,9 +73,9 @@ func DefaultSecurityConfig() *SecurityConfig {
 			// 危险的 shell 操作
 			"> /dev/sda", "mv /* /dev/null",
 		},
-		AllowSudo:        true, // 允许 sudo（环境安装需要）
+		AllowSudo:        false, // 默认禁用 sudo（需要时在配置中开启）
 		AllowedPaths:     []string{"/home", "/var", "/tmp", "/opt", "/etc", "/usr"},
-		ForbiddenPaths:   []string{"/etc/shadow", "/etc/sudoers", "/root/.ssh"},
+		ForbiddenPaths:   []string{"/etc/shadow", "/etc/sudoers", "/etc/passwd", "/root/.ssh", "/proc", "/sys"},
 		MaxCommandLength: 50000,
 		MaxArguments:     200,
 	}

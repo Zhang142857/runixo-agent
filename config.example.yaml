@@ -9,7 +9,7 @@ server:
   api_port: 9528
   # TLS 配置
   tls:
-    enabled: false
+    enabled: true
     cert: "/etc/runixo/cert.pem"
     key: "/etc/runixo/key.pem"
 
