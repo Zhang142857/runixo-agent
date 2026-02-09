@@ -1,0 +1,11 @@
+runixo-agent
+runixo-agent-*
+*.exe
+*.dll
+*.so
+*.dylib
+vendor/
+.DS_Store
+*.log
+*.pem
+*.key

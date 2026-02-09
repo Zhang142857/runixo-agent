@@ -1,0 +1,168 @@
+# Runixo Agent 自动发布工作流
+#
+# 触发条件: 推送 v* 标签时自动构建并发布
+#
+# 使用方法:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+
+name: Release Agent
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux_amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux_arm64
+          - goos: linux
+            goarch: arm
+            goarm: 7
+            suffix: linux_armv7
+          - goos: linux
+            goarch: 386
+            suffix: linux_386
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin_amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin_arm64
+          - goos: freebsd
+            goarch: amd64
+            suffix: freebsd_amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: agent/go.sum
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          cd agent
+          go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }} -X main.buildTime=$(date -u '+%Y-%m-%d_%H:%M:%S')" \
+            -o ../runixo-agent \
+            ./cmd/agent
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          # 重命名为平台特定名称
+          mv runixo-agent dist/runixo-agent-${{ matrix.suffix }}
+          # 同时创建 tar.gz 版本
+          cd dist
+          tar -czf runixo-agent-${{ matrix.suffix }}.tar.gz runixo-agent-${{ matrix.suffix }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runixo-agent_${{ matrix.suffix }}
+          path: |
+            dist/runixo-agent-${{ matrix.suffix }}
+            dist/runixo-agent-${{ matrix.suffix }}.tar.gz
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum runixo-agent-* *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Runixo Agent ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Runixo Agent ${{ steps.version.outputs.VERSION }}
+
+            ### 一键安装
+
+            ```bash
+            curl -fsSL https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/scripts/install.sh | sudo bash
+            ```
+
+            或指定版本:
+
+            ```bash
+            RUNIXO_VERSION=${{ steps.version.outputs.VERSION }} curl -fsSL https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/scripts/install.sh | sudo bash
+            ```
+
+            ### 手动安装
+
+            1. 下载对应平台的压缩包
+            2. 解压: `tar -xzf runixo-agent_*.tar.gz`
+            3. 移动到 PATH: `sudo mv runixo-agent /usr/local/bin/`
+            4. 创建配置文件: `sudo mkdir -p /etc/runixo && sudo runixo-agent --gen-token`
+            5. 创建 systemd 服务并启动
+
+            ### 支持平台
+
+            | 平台 | 架构 | 文件 |
+            |------|------|------|
+            | Linux | x86_64 | runixo-agent_linux_amd64.tar.gz |
+            | Linux | ARM64 | runixo-agent_linux_arm64.tar.gz |
+            | Linux | ARMv7 | runixo-agent_linux_armv7.tar.gz |
+            | Linux | x86 | runixo-agent_linux_386.tar.gz |
+            | macOS | x86_64 | runixo-agent_darwin_amd64.tar.gz |
+            | macOS | ARM64 (M1/M2) | runixo-agent_darwin_arm64.tar.gz |
+            | FreeBSD | x86_64 | runixo-agent_freebsd_amd64.tar.gz |
+
+            ### 校验和
+
+            下载后请验证文件完整性:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+
+          files: |
+            dist/runixo-agent-*
+            dist/*.tar.gz
+            dist/checksums.txt
+          draft: false
+          prerelease: false

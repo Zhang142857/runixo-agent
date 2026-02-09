@@ -1,0 +1,585 @@
+syntax = "proto3";
+
+package runixo;
+
+option go_package = "github.com/runixo/agent/api/proto";
+
+// AgentService - 核心Agent服务
+service AgentService {
+  // 认证
+  rpc Authenticate(AuthRequest) returns (AuthResponse);
+
+  // 系统信息
+  rpc GetSystemInfo(Empty) returns (SystemInfo);
+  rpc GetMetrics(MetricsRequest) returns (stream Metrics);
+
+  // 命令执行
+  rpc ExecuteCommand(CommandRequest) returns (CommandResponse);
+  rpc ExecuteShell(stream ShellInput) returns (stream ShellOutput);
+
+  // 文件操作
+  rpc ReadFile(FileRequest) returns (FileContent);
+  rpc WriteFile(WriteFileRequest) returns (ActionResponse);
+  rpc ListDirectory(DirRequest) returns (DirContent);
+  rpc DeleteFile(FileRequest) returns (ActionResponse);
+  
+  // 流式文件上传 - 支持大文件
+  rpc UploadFile(stream FileChunk) returns (UploadResponse);
+  
+  // 流式文件下载 - 支持大文件
+  rpc DownloadFile(FileRequest) returns (stream FileChunk);
+
+  // 日志流
+  rpc TailLog(LogRequest) returns (stream LogLine);
+
+  // 服务管理
+  rpc ListServices(ServiceFilter) returns (ServiceList);
+  rpc ServiceAction(ServiceActionRequest) returns (ActionResponse);
+
+  // 进程管理
+  rpc ListProcesses(ProcessFilter) returns (ProcessList);
+  rpc KillProcess(KillProcessRequest) returns (ActionResponse);
+
+  // Docker Hub 搜索（通过服务端代理）
+  rpc SearchDockerHub(DockerSearchRequest) returns (DockerSearchResponse);
+  
+  // HTTP 代理请求（通用）
+  rpc ProxyHttpRequest(HttpProxyRequest) returns (HttpProxyResponse);
+
+  // TLS 证书管理
+  rpc DownloadCertificate(Empty) returns (CertificateResponse);
+}
+
+// 空消息
+message Empty {}
+
+// 认证相关
+message AuthRequest {
+  string token = 1;
+  string client_version = 2;
+}
+
+message AuthResponse {
+  bool success = 1;
+  string message = 2;
+  string agent_version = 3;
+  int64 expires_at = 4;
+}
+
+// 系统信息
+message SystemInfo {
+  string hostname = 1;
+  string os = 2;
+  string platform = 3;
+  string platform_version = 4;
+  string kernel_version = 5;
+  string arch = 6;
+  int64 uptime = 7;
+  int64 boot_time = 8;
+  CpuInfo cpu = 10;
+  MemoryInfo memory = 11;
+  repeated DiskInfo disks = 12;
+  repeated NetworkInfo networks = 13;
+  repeated GpuInfo gpus = 20;
+}
+
+message CpuInfo {
+  string model = 1;
+  int32 cores = 2;
+  int32 threads = 3;
+  double frequency = 4;
+  repeated double usage_per_core = 5;
+}
+
+message MemoryInfo {
+  uint64 total = 1;
+  uint64 available = 2;
+  uint64 used = 3;
+  double used_percent = 4;
+  uint64 swap_total = 5;
+  uint64 swap_used = 6;
+}
+
+message DiskInfo {
+  string device = 1;
+  string mountpoint = 2;
+  string fstype = 3;
+  uint64 total = 4;
+  uint64 used = 5;
+  uint64 free = 6;
+  double used_percent = 7;
+}
+
+message NetworkInfo {
+  string name = 1;
+  repeated string addresses = 2;
+  string mac = 3;
+  uint64 bytes_sent = 4;
+  uint64 bytes_recv = 5;
+}
+
+message GpuInfo {
+  string name = 1;
+  string driver_version = 2;
+  uint64 memory_total = 3;
+  uint64 memory_used = 4;
+  double temperature = 5;
+  double utilization = 6;
+}
+
+// 监控指标
+message MetricsRequest {
+  int32 interval_seconds = 1;
+  repeated string metrics = 2;
+}
+
+message Metrics {
+  int64 timestamp = 1;
+  double cpu_usage = 2;
+  double memory_usage = 3;
+  repeated DiskMetric disk_metrics = 4;
+  repeated NetworkMetric network_metrics = 5;
+  double load_1 = 6;
+  double load_5 = 7;
+  double load_15 = 8;
+}
+
+message DiskMetric {
+  string device = 1;
+  uint64 read_bytes = 2;
+  uint64 write_bytes = 3;
+  uint64 read_count = 4;
+  uint64 write_count = 5;
+}
+
+message NetworkMetric {
+  string interface = 1;
+  uint64 bytes_sent = 2;
+  uint64 bytes_recv = 3;
+  uint64 packets_sent = 4;
+  uint64 packets_recv = 5;
+}
+
+// 命令执行
+message CommandRequest {
+  string command = 1;
+  repeated string args = 2;
+  string working_dir = 3;
+  map<string, string> env = 4;
+  int32 timeout_seconds = 5;
+  bool sudo = 6;
+}
+
+message CommandResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  int64 duration_ms = 4;
+}
+
+message ShellInput {
+  oneof input {
+    ShellStart start = 1;
+    bytes data = 2;
+    ShellResize resize = 3;
+  }
+}
+
+message ShellStart {
+  string shell = 1;
+  int32 rows = 2;
+  int32 cols = 3;
+  map<string, string> env = 4;
+}
+
+message ShellResize {
+  int32 rows = 1;
+  int32 cols = 2;
+}
+
+message ShellOutput {
+  bytes data = 1;
+}
+
+// 文件操作
+message FileRequest {
+  string path = 1;
+}
+
+message FileContent {
+  bytes content = 1;
+  FileInfo info = 2;
+}
+
+message FileInfo {
+  string name = 1;
+  string path = 2;
+  int64 size = 3;
+  int64 mode = 4;
+  int64 mod_time = 5;
+  bool is_dir = 6;
+  string owner = 7;
+  string group = 8;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes content = 2;
+  int64 mode = 3;
+  bool create_dirs = 4;
+}
+
+// 流式文件传输
+message FileChunk {
+  oneof data {
+    FileUploadStart start = 1;    // 开始上传，包含元信息
+    bytes chunk = 2;              // 文件数据块
+    FileUploadEnd end = 3;        // 结束上传
+  }
+}
+
+message FileUploadStart {
+  string path = 1;                // 目标路径
+  int64 total_size = 2;           // 文件总大小
+  int64 mode = 3;                 // 文件权限
+  bool create_dirs = 4;           // 是否创建父目录
+  string checksum = 5;            // 可选：文件校验和 (sha256)
+  bool is_tar_gz = 6;             // 是否是 tar.gz 压缩包（需要解压）
+  string extract_to = 7;          // 如果是压缩包，解压到此目录
+}
+
+message FileUploadEnd {
+  string checksum = 1;            // 可选：最终校验和
+}
+
+message UploadResponse {
+  bool success = 1;
+  string message = 2;
+  string error = 3;
+  int64 bytes_written = 4;        // 实际写入的字节数
+  string path = 5;                // 最终文件路径
+}
+
+message DirRequest {
+  string path = 1;
+  bool recursive = 2;
+  bool show_hidden = 3;
+}
+
+message DirContent {
+  string path = 1;
+  repeated FileInfo files = 2;
+}
+
+// 日志
+message LogRequest {
+  string path = 1;
+  int32 lines = 2;
+  bool follow = 3;
+}
+
+message LogLine {
+  string content = 1;
+  int64 timestamp = 2;
+}
+
+// 服务管理
+message ServiceFilter {
+  string name_filter = 1;
+  string status_filter = 2;
+}
+
+message ServiceList {
+  repeated ServiceInfo services = 1;
+}
+
+message ServiceInfo {
+  string name = 1;
+  string status = 2;
+  string description = 3;
+  bool enabled = 4;
+  int32 pid = 5;
+  int64 uptime = 6;
+}
+
+message ServiceActionRequest {
+  string name = 1;
+  ServiceAction action = 2;
+}
+
+enum ServiceAction {
+  SERVICE_START = 0;
+  SERVICE_STOP = 1;
+  SERVICE_RESTART = 2;
+  SERVICE_ENABLE = 3;
+  SERVICE_DISABLE = 4;
+}
+
+// 进程管理
+message ProcessFilter {
+  string name_filter = 1;
+  string user_filter = 2;
+}
+
+message ProcessList {
+  repeated ProcessInfo processes = 1;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  int32 ppid = 2;
+  string name = 3;
+  string user = 4;
+  string status = 5;
+  double cpu_percent = 6;
+  double memory_percent = 7;
+  uint64 memory_rss = 8;
+  int64 create_time = 9;
+  string cmdline = 10;
+}
+
+message KillProcessRequest {
+  int32 pid = 1;
+  int32 signal = 2;
+}
+
+// 通用响应
+message ActionResponse {
+  bool success = 1;
+  string message = 2;
+  string error = 3;
+}
+
+
+// Docker Hub 搜索
+message DockerSearchRequest {
+  string query = 1;
+  int32 page_size = 2;
+  int32 page = 3;
+}
+
+message DockerSearchResponse {
+  bool success = 1;
+  string error = 2;
+  repeated DockerImage results = 3;
+  int32 total_count = 4;
+}
+
+message DockerImage {
+  string name = 1;
+  string description = 2;
+  int64 star_count = 3;
+  bool is_official = 4;
+  bool is_automated = 5;
+  int64 pull_count = 6;
+}
+
+// HTTP 代理请求
+message HttpProxyRequest {
+  string url = 1;
+  string method = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+  int32 timeout_seconds = 5;
+}
+
+message HttpProxyResponse {
+  bool success = 1;
+  int32 status_code = 2;
+  string status_text = 3;
+  map<string, string> headers = 4;
+  bytes body = 5;
+  string error = 6;
+}
+
+// ==================== 插件系统 ====================
+
+// 插件服务
+service PluginService {
+  // 列出已安装的插件
+  rpc ListPlugins(Empty) returns (PluginList);
+  // 安装插件
+  rpc InstallPlugin(InstallPluginRequest) returns (ActionResponse);
+  // 卸载插件
+  rpc UninstallPlugin(PluginRequest) returns (ActionResponse);
+  // 启用插件
+  rpc EnablePlugin(PluginRequest) returns (ActionResponse);
+  // 禁用插件
+  rpc DisablePlugin(PluginRequest) returns (ActionResponse);
+  // 获取插件配置
+  rpc GetPluginConfig(PluginRequest) returns (PluginConfig);
+  // 设置插件配置
+  rpc SetPluginConfig(SetPluginConfigRequest) returns (ActionResponse);
+  // 获取插件状态
+  rpc GetPluginStatus(PluginRequest) returns (PluginStatus);
+  // 获取可用插件列表（从远程仓库）
+  rpc GetAvailablePlugins(Empty) returns (AvailablePluginList);
+}
+
+// 插件请求
+message PluginRequest {
+  string plugin_id = 1;
+}
+
+// 安装插件请求
+message InstallPluginRequest {
+  string plugin_id = 1;
+  string source = 2;           // 来源: official, url, local
+  string url = 3;              // 如果 source 是 url，则为下载地址
+  bytes data = 4;              // 如果 source 是 local，则为插件数据
+}
+
+// 插件列表
+message PluginList {
+  repeated PluginInfo plugins = 1;
+}
+
+// 插件信息
+message PluginInfo {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  string author = 5;
+  string icon = 6;
+  PluginState state = 7;
+  PluginType type = 8;
+  repeated string permissions = 9;
+  int64 installed_at = 10;
+  int64 updated_at = 11;
+}
+
+// 插件状态
+enum PluginState {
+  PLUGIN_INSTALLED = 0;
+  PLUGIN_ENABLED = 1;
+  PLUGIN_DISABLED = 2;
+  PLUGIN_ERROR = 3;
+  PLUGIN_UPDATING = 4;
+}
+
+// 插件类型
+enum PluginType {
+  PLUGIN_CLIENT = 0;           // 仅客户端插件
+  PLUGIN_AGENT = 1;            // 仅 Agent 端插件
+  PLUGIN_HYBRID = 2;           // 混合插件（客户端 + Agent）
+}
+
+// 插件配置
+message PluginConfig {
+  string plugin_id = 1;
+  string config_json = 2;      // JSON 格式的配置
+}
+
+// 设置插件配置请求
+message SetPluginConfigRequest {
+  string plugin_id = 1;
+  string config_json = 2;
+}
+
+// 插件状态详情
+message PluginStatus {
+  string plugin_id = 1;
+  PluginState state = 2;
+  bool running = 3;
+  string error = 4;
+  int64 uptime = 5;
+  map<string, string> stats = 6;
+}
+
+// 可用插件列表
+message AvailablePluginList {
+  repeated AvailablePlugin plugins = 1;
+}
+
+// 可用插件信息
+message AvailablePlugin {
+  string id = 1;
+  string name = 2;
+  string version = 3;
+  string description = 4;
+  string author = 5;
+  string icon = 6;
+  PluginType type = 7;
+  int64 downloads = 8;
+  double rating = 9;
+  int32 rating_count = 10;
+  repeated string tags = 11;
+  string category = 12;
+  bool official = 13;
+  string download_url = 14;
+  string updated_at = 15;
+}
+
+// ==================== 自动更新系统 ====================
+
+// 更新服务
+service UpdateService {
+  // 检查更新
+  rpc CheckUpdate(Empty) returns (UpdateInfo);
+  // 下载更新
+  rpc DownloadUpdate(UpdateRequest) returns (stream DownloadProgress);
+  // 应用更新
+  rpc ApplyUpdate(UpdateRequest) returns (ActionResponse);
+  // 获取更新配置
+  rpc GetUpdateConfig(Empty) returns (UpdateConfig);
+  // 设置更新配置
+  rpc SetUpdateConfig(UpdateConfig) returns (ActionResponse);
+  // 获取更新历史
+  rpc GetUpdateHistory(Empty) returns (UpdateHistory);
+}
+
+// 更新信息
+message UpdateInfo {
+  bool available = 1;
+  string current_version = 2;
+  string latest_version = 3;
+  string release_notes = 4;
+  string download_url = 5;
+  int64 size = 6;
+  string checksum = 7;
+  string release_date = 8;
+  bool is_critical = 9;
+}
+
+// 更新请求
+message UpdateRequest {
+  string version = 1;
+}
+
+// 下载进度
+message DownloadProgress {
+  int64 downloaded = 1;
+  int64 total = 2;
+  int32 percent = 3;
+  string status = 4;           // downloading, verifying, ready
+}
+
+// 更新配置
+message UpdateConfig {
+  bool auto_update = 1;
+  int32 check_interval = 2;    // 检查间隔（秒）
+  string update_channel = 3;   // stable, beta, nightly
+  string last_check = 4;
+  bool notify_only = 5;        // 仅通知，不自动安装
+}
+
+// 更新历史
+message UpdateHistory {
+  repeated UpdateRecord records = 1;
+}
+
+// 更新记录
+message UpdateRecord {
+  string version = 1;
+  string from_version = 2;
+  int64 timestamp = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+// 证书响应
+message CertificateResponse {
+  string certificate = 1;  // PEM 格式的证书内容
+  string fingerprint = 2;  // 证书指纹（SHA256）
+}

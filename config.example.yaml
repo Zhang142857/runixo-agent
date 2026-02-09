@@ -1,0 +1,50 @@
+# Runixo Agent 配置文件
+
+server:
+  # 监听地址
+  host: "0.0.0.0"
+  # gRPC 端口
+  port: 9527
+  # REST API 端口
+  api_port: 9528
+  # TLS 配置
+  tls:
+    enabled: false
+    cert: "/etc/runixo/cert.pem"
+    key: "/etc/runixo/key.pem"
+
+# 认证配置
+auth:
+  # 认证令牌（使用 runixo-agent --gen-token 生成）
+  token: ""
+
+# 监控配置
+metrics:
+  # 采集间隔（秒）
+  interval: 2
+
+# 日志配置
+log:
+  # 日志级别: debug, info, warn, error
+  level: "info"
+
+# 数据存储配置
+data:
+  # 数据目录
+  dir: "/var/lib/runixo"
+
+# 插件配置
+plugins:
+  # 插件目录
+  dir: "/var/lib/runixo/plugins"
+
+# 自动更新配置
+update:
+  # 是否启用自动更新
+  auto: false
+  # 更新通道: stable, beta, nightly
+  channel: "stable"
+  # 检查间隔（秒）
+  interval: 3600
+  # 仅通知，不自动安装
+  notify_only: true
