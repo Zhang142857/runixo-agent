@@ -350,6 +350,9 @@ show_result() {
         cat "$cert_file"
         echo "-----END RUNIXO CERTIFICATE-----"
     fi
+    
+    # 输出纯文本 Token（供客户端 SSH 安装解析）
+    echo "Token: ${token}"
 }
 
 main() {
