@@ -22,7 +22,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # 配置
-GITHUB_REPO="Zhang142857/runixo"
+GITHUB_REPO="Zhang142857/runixo-agent"
 BINARY_NAME="runixo-agent"
 CONFIG_DIR="/etc/runixo"
 CONFIG_FILE="${CONFIG_DIR}/agent.yaml"
@@ -172,8 +172,15 @@ download_binary() {
             ;;
     esac
     
-    local filename="runixo-agent-linux-${arch}"
-    local url="https://github.com/${GITHUB_REPO}/releases/download/latest/${filename}"
+    local filename="runixo-agent-linux_${arch}"
+    
+    # 获取最新版本号
+    local latest_version=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null)
+    if [ -z "$latest_version" ]; then
+        latest_version="latest"
+    fi
+    
+    local url="https://github.com/${GITHUB_REPO}/releases/download/${latest_version}/${filename}"
     
     log_info "架构: ${arch}"
     
