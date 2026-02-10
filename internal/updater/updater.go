@@ -370,18 +370,10 @@ func (u *Updater) ApplyUpdate(version string) error {
 		return fmt.Errorf("没有可用更新")
 	}
 
-	downloadDir := filepath.Join(u.dataDir, "downloads")
-	if err := os.MkdirAll(downloadDir, 0700); err != nil {
-		return err
-	}
-
-	binaryPath := filepath.Join(downloadDir, "runixo-agent")
-	if runtime.GOOS == "windows" {
-		binaryPath += ".exe"
-	}
-
-	if err := u.downloadFile(info.DownloadURL, binaryPath, info.Size, nil); err != nil {
-		return fmt.Errorf("下载失败: %w", err)
+	// 安全修复：使用 downloadAndExtract（包含 SHA256 校验），而不是直接 downloadFile
+	binaryPath, err := u.downloadAndExtract(info, nil)
+	if err != nil {
+		return fmt.Errorf("下载验证失败: %w", err)
 	}
 
 	return u.applyBinary(binaryPath, version)
