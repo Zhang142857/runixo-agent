@@ -520,7 +520,7 @@ func (sm *SecurityManager) saveConfig() {
 		return
 	}
 
-	if err := os.WriteFile(filePath, data, 0644); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		log.Error().Err(err).Msg("保存安全配置失败")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -56,7 +57,11 @@ func NewAuthInterceptor(token string) *AuthInterceptor {
 	if !requireAuth {
 		// 如果没有配置令牌，生成一个随机令牌并记录警告
 		// 在生产环境中应该强制配置令牌
-		token, _ = GenerateToken()
+		var err error
+		token, err = GenerateToken()
+		if err != nil {
+			log.Fatalf("无法生成认证令牌，拒绝启动: %v", err)
+		}
 	}
 
 	a := &AuthInterceptor{
