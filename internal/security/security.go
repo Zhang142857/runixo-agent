@@ -112,6 +112,19 @@ func (v *CommandValidator) ValidateCommand(command string, args []string, sudo b
 		return fmt.Errorf("sudo 执行已被禁用")
 	}
 
+	// sudo 命令白名单检查
+	if sudo {
+		sudoWhitelist := map[string]bool{
+			"systemctl": true, "service": true, "journalctl": true,
+			"apt": true, "apt-get": true, "yum": true, "dnf": true, "pacman": true, "zypper": true,
+			"mkdir": true, "chown": true, "chmod": true, "cp": true, "mv": true, "rm": true,
+			"docker": true, "runixo": true,
+		}
+		if !sudoWhitelist[command] {
+			return fmt.Errorf("命令 '%s' 不允许使用 sudo", command)
+		}
+	}
+
 	// 检查危险命令
 	if err := v.checkDangerousCommand(fullCommand); err != nil {
 		return err

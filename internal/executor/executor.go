@@ -177,12 +177,21 @@ func Execute(ctx context.Context, command string, args []string, opts Options) (
 // FilterEnvVars 过滤危险的环境变量
 func FilterEnvVars(envs []string) []string {
 	dangerousVars := map[string]bool{
-		"LD_PRELOAD":      true,
-		"LD_LIBRARY_PATH": true,
+		"LD_PRELOAD":            true,
+		"LD_LIBRARY_PATH":      true,
 		"DYLD_INSERT_LIBRARIES": true,
-		"BASH_ENV":        true,
-		"ENV":             true,
-		"PROMPT_COMMAND":  true,
+		"BASH_ENV":              true,
+		"ENV":                   true,
+		"PROMPT_COMMAND":        true,
+		// 语言运行时路径注入
+		"PYTHONPATH":  true,
+		"PERL5LIB":   true,
+		"PERLLIB":     true,
+		"NODE_PATH":   true,
+		"RUBYLIB":     true,
+		"CLASSPATH":   true,
+		"LUA_PATH":    true,
+		"LUA_CPATH":   true,
 	}
 
 	var filtered []string

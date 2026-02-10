@@ -1,7 +1,9 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -16,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/rs/zerolog/log"
 	pb "github.com/runixo/agent/api/proto"
 	"github.com/runixo/agent/internal/collector"
@@ -140,102 +141,12 @@ func (s *AgentServer) ExecuteCommand(ctx context.Context, req *pb.CommandRequest
 	}, nil
 }
 
-// allowedShells 允许使用的 shell 列表
-var allowedShells = map[string]bool{
-	"/bin/bash": true, "/bin/sh": true, "/bin/zsh": true,
-	"/usr/bin/bash": true, "/usr/bin/zsh": true,
-	"bash": true, "sh": true, "zsh": true,
-}
-
-// ExecuteShell 交互式 Shell
+// ExecuteShell 交互式 Shell（已禁用）
+// 安全修复：交互式 Shell 允许执行任意命令，完全绕过命令白名单
+// 替代方案：使用 SSH 连接服务器，或使用 ExecuteCommand
 func (s *AgentServer) ExecuteShell(stream pb.AgentService_ExecuteShellServer) error {
-	firstMsg, err := stream.Recv()
-	if err != nil {
-		return err
-	}
-
-	start := firstMsg.GetStart()
-	if start == nil {
-		return status.Error(codes.InvalidArgument, "首条消息必须是启动消息")
-	}
-
-	shell := start.Shell
-	if shell == "" {
-		shell = os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/bash"
-		}
-	}
-
-	// 安全检查：限制可用 shell
-	if !allowedShells[shell] {
-		return status.Errorf(codes.PermissionDenied, "不允许的 shell: %s", shell)
-	}
-
-	cmd := exec.Command(shell)
-	// 安全检查：过滤危险环境变量，复用 executor 的过滤逻辑
-	cmd.Env = executor.FilterEnvVars(os.Environ())
-	for k, v := range start.Env {
-		if executor.IsValidEnvVar(k) {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
-	}
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(start.Rows),
-		Cols: uint16(start.Cols),
-	})
-	if err != nil {
-		return status.Errorf(codes.Internal, "启动 PTY 失败: %v", err)
-	}
-	defer ptmx.Close()
-
-	ctx := stream.Context()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			n, err := ptmx.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					log.Error().Err(err).Msg("读取 PTY 失败")
-				}
-				return
-			}
-			if err := stream.Send(&pb.ShellOutput{Data: buf[:n]}); err != nil {
-				return
-			}
-		}
-	}()
-
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-
-		switch input := msg.Input.(type) {
-		case *pb.ShellInput_Data:
-			if _, err := ptmx.Write(input.Data); err != nil {
-				return status.Errorf(codes.Internal, "写入 PTY 失败: %v", err)
-			}
-		case *pb.ShellInput_Resize:
-			if err := pty.Setsize(ptmx, &pty.Winsize{
-				Rows: uint16(input.Resize.Rows),
-				Cols: uint16(input.Resize.Cols),
-			}); err != nil {
-				log.Error().Err(err).Msg("调整 PTY 大小失败")
-			}
-		}
-	}
+	return status.Error(codes.Unimplemented,
+		"交互式 Shell 已禁用。请使用 SSH 连接服务器，或使用命令执行功能。")
 }
 
 // ReadFile 读取文件
@@ -403,20 +314,25 @@ func (s *AgentServer) UploadFile(stream pb.AgentService_UploadFileServer) error 
 
 					// 创建解压目录
 					if err := os.MkdirAll(extractTo, 0755); err != nil {
-						os.Remove(filePath) // 清理临时文件
+						os.Remove(filePath)
 						return status.Errorf(codes.Internal, "创建解压目录失败: %v", err)
 					}
 
-					// 解压（使用 --no-same-owner 防止权限问题，验证无路径遍历）
+					// Zip-slip 防护：解压前验证 tar.gz 内容
+					if err := validateTarGzBeforeExtract(filePath, extractTo); err != nil {
+						os.Remove(filePath)
+						return status.Errorf(codes.InvalidArgument, "解压安全检查失败: %v", err)
+					}
+
+					// 解压
 					cmd := exec.Command("tar", "--no-same-owner", "-xzf", filePath, "-C", extractTo)
 					if output, err := cmd.CombinedOutput(); err != nil {
-						os.Remove(filePath) // 清理临时文件
+						os.Remove(filePath)
 						return status.Errorf(codes.Internal, "解压失败: %v, output: %s", err, string(output))
 					}
 
-					// Zip-slip 防护：验证解压后所有文件都在目标目录内
+					// 二次验证：解压后检查
 					if err := validateExtractedFiles(extractTo); err != nil {
-						// 清理解压的文件
 						os.RemoveAll(extractTo)
 						os.Remove(filePath)
 						return status.Errorf(codes.InvalidArgument, "解压安全检查失败: %v", err)
@@ -805,10 +721,35 @@ func (s *AgentServer) ProxyHttpRequest(ctx context.Context, req *pb.HttpProxyReq
 	}
 
 	// 发起请求（禁用自动重定向，防止 302 绕过 SSRF 检查）
+	// DNS 重绑定防护：自定义 Transport 在连接时再次验证 IP
 	client := &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				if ip := net.ParseIP(host); ip == nil {
+					ips, err := net.LookupIP(host)
+					if err != nil {
+						return nil, fmt.Errorf("DNS 解析失败: %v", err)
+					}
+					for _, ip := range ips {
+						if err := checkBlockedIP(ip); err != nil {
+							return nil, fmt.Errorf("DNS 重绑定检测: %v", err)
+						}
+					}
+				} else {
+					if err := checkBlockedIP(ip); err != nil {
+						return nil, err
+					}
+				}
+				return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
+			},
 		},
 	}
 	resp, err := client.Do(httpReq)
@@ -957,4 +898,57 @@ func validateExtractedFiles(extractTo string) error {
 		}
 		return nil
 	})
+}
+
+// validateTarGzBeforeExtract 在解压前验证 tar.gz 文件内容（Zip-Slip 防护）
+func validateTarGzBeforeExtract(tarGzPath, extractTo string) error {
+	absExtractTo, err := filepath.Abs(extractTo)
+	if err != nil {
+		return fmt.Errorf("无法解析目标目录: %v", err)
+	}
+
+	file, err := os.Open(tarGzPath)
+	if err != nil {
+		return fmt.Errorf("打开文件失败: %v", err)
+	}
+	defer file.Close()
+
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("gzip 解析失败: %v", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("读取 tar 失败: %v", err)
+		}
+
+		cleanName := filepath.Clean(header.Name)
+		if strings.Contains(cleanName, "..") {
+			return fmt.Errorf("检测到路径遍历: %s", header.Name)
+		}
+
+		targetPath := filepath.Join(absExtractTo, cleanName)
+		if !strings.HasPrefix(targetPath, absExtractTo+string(filepath.Separator)) && targetPath != absExtractTo {
+			return fmt.Errorf("检测到路径遍历: %s -> %s", header.Name, targetPath)
+		}
+
+		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeLink {
+			linkTarget := filepath.Clean(header.Linkname)
+			if filepath.IsAbs(linkTarget) {
+				return fmt.Errorf("检测到绝对路径符号链接: %s -> %s", header.Name, linkTarget)
+			}
+			resolvedLink := filepath.Join(filepath.Dir(targetPath), linkTarget)
+			if !strings.HasPrefix(resolvedLink, absExtractTo+string(filepath.Separator)) && resolvedLink != absExtractTo {
+				return fmt.Errorf("检测到符号链接路径遍历: %s -> %s", header.Name, linkTarget)
+			}
+		}
+	}
+	return nil
 }
