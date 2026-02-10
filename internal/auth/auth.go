@@ -21,44 +21,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// 安全配置（平衡安全和便利）
+// 安全配置
 const (
-	MaxFailedAttempts    = 5                // 最大失败尝试次数
-	LockoutDuration      = 15 * time.Minute // 锁定时间
-	TokenMinLength       = 32               // 令牌最小长度
-	DefaultTokenExpiry   = 7 * 24 * time.Hour // 默认令牌有效期：7天（方便）
-	MinTokenExpiry       = 1 * time.Hour      // 最小令牌有效期
-	MaxTokenExpiry       = 30 * 24 * time.Hour // 最大令牌有效期：30天
+	MaxFailedAttempts = 5                // 最大失败尝试次数
+	LockoutDuration   = 15 * time.Minute // 锁定时间
+	TokenMinLength    = 32               // 令牌最小长度
 )
-
-// TokenConfig 令牌配置
-type TokenConfig struct {
-	// 是否启用令牌过期（默认false，方便使用）
-	EnableExpiry bool `json:"enable_expiry"`
-	// 令牌有效期
-	ExpiryDuration time.Duration `json:"expiry_duration"`
-	// 是否允许令牌刷新
-	AllowRefresh bool `json:"allow_refresh"`
-	// 刷新窗口（过期前多久可以刷新）
-	RefreshWindow time.Duration `json:"refresh_window"`
-}
-
-// DefaultTokenConfig 返回默认令牌配置（安全优先）
-func DefaultTokenConfig() *TokenConfig {
-	return &TokenConfig{
-		EnableExpiry:   true,               // 默认启用过期，安全优先
-		ExpiryDuration: DefaultTokenExpiry, // 7天有效期
-		AllowRefresh:   true,               // 允许静默刷新（客户端自动续期，用户无感知）
-		RefreshWindow:  48 * time.Hour,     // 过期前48小时可刷新（宽松窗口确保客户端有足够时间续期）
-	}
-}
 
 // SessionInfo 会话信息
 type SessionInfo struct {
 	Token     string    `json:"token"`
 	ClientIP  string    `json:"client_ip"`
 	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
 	LastUsed  time.Time `json:"last_used"`
 }
 
@@ -335,10 +309,7 @@ func ValidateSignedToken(token string, secretKey []byte) error {
 		return fmt.Errorf("invalid token claims")
 	}
 
-	// 验证过期时间
-	if time.Now().Unix() > claims.ExpiresAt {
-		return fmt.Errorf("token expired")
-	}
+	// Token 永不过期，删除过期检查
 
 	return nil
 }
@@ -348,35 +319,17 @@ func ValidateToken(token string) bool {
 	return len(token) >= TokenMinLength
 }
 
-// SessionManager 会话管理器（可选功能，默认不启用过期）
+// SessionManager 会话管理器
 type SessionManager struct {
-	config   *TokenConfig
 	sessions map[string]*SessionInfo
 	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
 }
 
 // NewSessionManager 创建会话管理器
-func NewSessionManager(config *TokenConfig) *SessionManager {
-	if config == nil {
-		config = DefaultTokenConfig()
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	sm := &SessionManager{
-		config:   config,
+func NewSessionManager() *SessionManager {
+	return &SessionManager{
 		sessions: make(map[string]*SessionInfo),
-		ctx:      ctx,
-		cancel:   cancel,
 	}
-
-	// 如果启用过期，启动清理协程
-	if config.EnableExpiry {
-		go sm.cleanupLoop()
-	}
-
-	return sm
 }
 
 // CreateSession 创建会话
@@ -390,11 +343,6 @@ func (sm *SessionManager) CreateSession(token, clientIP string) *SessionInfo {
 		ClientIP:  clientIP,
 		CreatedAt: now,
 		LastUsed:  now,
-	}
-
-	// 如果启用过期，设置过期时间
-	if sm.config.EnableExpiry {
-		session.ExpiresAt = now.Add(sm.config.ExpiryDuration)
 	}
 
 	sm.sessions[token] = session
@@ -411,48 +359,11 @@ func (sm *SessionManager) ValidateSession(token string) (*SessionInfo, error) {
 		return nil, nil // 会话不存在，回退到静态令牌验证
 	}
 
-	// 检查是否过期
-	if sm.config.EnableExpiry && time.Now().After(session.ExpiresAt) {
-		sm.mu.Lock()
-		delete(sm.sessions, token)
-		sm.mu.Unlock()
-		return nil, status.Error(codes.Unauthenticated, "会话已过期，请重新认证")
-	}
-
 	// 更新最后使用时间
 	sm.mu.Lock()
 	session.LastUsed = time.Now()
 	sm.mu.Unlock()
 
-	return session, nil
-}
-
-// RefreshSession 刷新会话（延长有效期）
-func (sm *SessionManager) RefreshSession(token string) (*SessionInfo, error) {
-	if !sm.config.AllowRefresh {
-		return nil, status.Error(codes.PermissionDenied, "令牌刷新已禁用")
-	}
-
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	session, exists := sm.sessions[token]
-	if !exists {
-		return nil, status.Error(codes.NotFound, "会话不存在")
-	}
-
-	// 检查是否在刷新窗口内
-	if sm.config.EnableExpiry {
-		refreshStart := session.ExpiresAt.Add(-sm.config.RefreshWindow)
-		if time.Now().Before(refreshStart) {
-			return nil, status.Error(codes.FailedPrecondition, "还未到刷新时间")
-		}
-
-		// 延长有效期
-		session.ExpiresAt = time.Now().Add(sm.config.ExpiryDuration)
-	}
-
-	session.LastUsed = time.Now()
 	return session, nil
 }
 
@@ -477,50 +388,6 @@ func (sm *SessionManager) GetActiveSessions() int {
 	return len(sm.sessions)
 }
 
-// cleanupLoop 清理过期会话
-func (sm *SessionManager) cleanupLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-sm.ctx.Done():
-			return
-		case <-ticker.C:
-			sm.cleanup()
-		}
-	}
-}
-
-// cleanup 清理过期会话
-func (sm *SessionManager) cleanup() {
-	if !sm.config.EnableExpiry {
-		return
-	}
-
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	now := time.Now()
-	for token, session := range sm.sessions {
-		if now.After(session.ExpiresAt) {
-			delete(sm.sessions, token)
-		}
-	}
-}
-
-// GetConfig 获取配置
-func (sm *SessionManager) GetConfig() *TokenConfig {
-	return sm.config
-}
-
-// SetConfig 更新配置
-func (sm *SessionManager) SetConfig(config *TokenConfig) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	sm.config = config
-}
-
 // GetSessionInfo 获取会话信息
 func (sm *SessionManager) GetSessionInfo(token string) *SessionInfo {
 	sm.mu.RLock()
@@ -528,9 +395,3 @@ func (sm *SessionManager) GetSessionInfo(token string) *SessionInfo {
 	return sm.sessions[token]
 }
 
-// Close 关闭会话管理器，停止清理协程
-func (sm *SessionManager) Close() {
-	if sm.cancel != nil {
-		sm.cancel()
-	}
-}
