@@ -361,6 +361,11 @@ func isProtectedProcess(name string) bool {
 		"init": true, "systemd": true, "sshd": true,
 		"runixo-agent": true, "dockerd": true, "containerd": true,
 		"kernel": true, "kthreadd": true, "ksoftirqd": true,
+		// 数据库进程 — 强杀可能导致数据损坏
+		"mysqld": true, "mysql": true, "mariadbd": true, "mariadb": true,
+		"postgres": true, "postgresql": true,
+		"mongod": true, "mongos": true,
+		"redis-server": true, "redis-sentinel": true,
 	}
 	return protected[name]
 }

@@ -117,7 +117,7 @@ func (v *CommandValidator) ValidateCommand(command string, args []string, sudo b
 		sudoWhitelist := map[string]bool{
 			"systemctl": true, "service": true, "journalctl": true,
 			"apt": true, "apt-get": true, "yum": true, "dnf": true, "pacman": true, "zypper": true,
-			"mkdir": true, "chown": true, "chmod": true, "cp": true, "mv": true, "rm": true,
+			"mkdir": true, "chown": true, "chmod": true, "cp": true, "mv": true,
 			"docker": true, "runixo": true,
 		}
 		if !sudoWhitelist[command] {

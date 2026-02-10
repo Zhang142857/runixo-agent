@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 	pb "github.com/runixo/agent/api/proto"
 	"github.com/runixo/agent/internal/api"
+	"github.com/runixo/agent/internal/audit"
 	"github.com/runixo/agent/internal/auth"
 	"github.com/runixo/agent/internal/plugin"
 	"github.com/runixo/agent/internal/ratelimit"
@@ -217,8 +218,14 @@ func run() error {
 	authInterceptor := auth.NewAuthInterceptor(token)
 	rateLimiter := ratelimit.NewLimiter(nil) // 使用默认配置
 
+	// 审计日志
+	auditLogger, _ := audit.NewLogger(&audit.Config{
+		Enabled: true,
+		LogPath: filepath.Join(dataDir, "audit", "audit.log"),
+	})
+
 	opts = append(opts,
-		grpc.ChainUnaryInterceptor(rateLimiter.UnaryInterceptor(), authInterceptor.Unary()),
+		grpc.ChainUnaryInterceptor(rateLimiter.UnaryInterceptor(), authInterceptor.Unary(), auditLogger.UnaryInterceptor()),
 		grpc.ChainStreamInterceptor(rateLimiter.StreamInterceptor(), authInterceptor.Stream()),
 	)
 

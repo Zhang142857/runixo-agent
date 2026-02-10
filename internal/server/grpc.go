@@ -455,7 +455,7 @@ func (s *AgentServer) UploadFile(stream pb.AgentService_UploadFileServer) error 
 				log.Debug().
 					Int64("received", bytesRecv).
 					Int64("total", totalSize).
-					Float64("percent", float64(bytesRecv)/float64(totalSize)*100).
+					Float64("percent", func() float64 { if totalSize > 0 { return float64(bytesRecv)/float64(totalSize)*100 }; return 0 }()).
 					Msg("上传进度")
 			}
 
