@@ -51,7 +51,7 @@ Runixo Agent 是 [Runixo](https://github.com/Zhang142857/runixo) 服务器管理
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo-agent/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo-agent/security-test/scripts/install.sh | sudo bash
 ```
 
 自动完成：下载二进制 → 创建 systemd 服务 → 生成 TLS 证书和 Token → 启动
@@ -163,7 +163,7 @@ make test           # 运行测试
 ## 🗑️ 卸载
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo-agent/main/scripts/uninstall.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo-agent/security-test/scripts/uninstall.sh | sudo bash
 ```
 
 ---

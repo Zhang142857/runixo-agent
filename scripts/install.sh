@@ -3,7 +3,7 @@
 # Runixo Agent 一键安装脚本
 #
 # 使用方法:
-#   curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo/main/scripts/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/Zhang142857/runixo-agent/security-test/scripts/install.sh | sudo bash
 #
 # 环境变量:
 #   RUNIXO_TOKEN    - 预设认证令牌

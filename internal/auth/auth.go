@@ -314,7 +314,13 @@ func ValidateSignedToken(token string, secretKey []byte) error {
 		return fmt.Errorf("invalid token claims")
 	}
 
-	// Token 永不过期，删除过期检查
+	if claims.ExpiresAt <= 0 {
+		return fmt.Errorf("invalid token expiry")
+	}
+
+	if time.Now().Unix() > claims.ExpiresAt {
+		return fmt.Errorf("token expired")
+	}
 
 	return nil
 }
@@ -399,4 +405,3 @@ func (sm *SessionManager) GetSessionInfo(token string) *SessionInfo {
 	defer sm.mu.RUnlock()
 	return sm.sessions[token]
 }
-
